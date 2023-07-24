@@ -1,0 +1,284 @@
+---
+title: "Airbnb Price Analysis in R"
+author: "Yang"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Outline
+* Introduction
+* Data Collection and Loading
+* Data Understanding and Cleaning
+* Descriptive Statistics and Geospatial Analysis
+* Feature Selection
+* Modeling and Predictions
+
+
+# Load required libraries
+```{r include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(lubridate)
+library(readr)
+library(gplots)
+library(reshape2)
+library(maps)
+library(stats)
+library(caret)
+library(e1071)
+```
+# 1. Introduction
+
+Airbnb, the popular online platform for organizing and providing accommodations, currently boasts a staggering inventory of over 6 million rooms and houses in 81,000 cities. With a vast user base of over 150 million individuals worldwide, Airbnb sees an impressive volume of 2 million guests staying in its rentals on any given night, making it a prominent player in the global lodging industry.
+
+With an extensive number of listings available, determining a fair price for an Airbnb rental poses a significant challenge encountered by all users. This issue holds immense importance for both Airbnb users and property owners, as it directly influences their operations. The fact that 53% of travelers choose Airbnb due to potential cost savings underscores the critical role that pricing plays, as it significantly impacts the demand for rentals [2]. Furthermore, statistics reveal that only 11% of the nearly 500,000 listings in the United States are typically reserved on a given night, indicating ample room for improvement .
+
+To address this issue, our project aims to provide insights into the value of an Airbnb listing. By answering the fundamental question of "How much is an Airbnb listing worth?", we aim to empower both users and property owners to accurately assess the market value of their offerings. This knowledge will facilitate smoother transactions within the Airbnb market, enhancing the efficiency and profitability of all involved parties.
+
+# 2. Data Collection and Loading
+
+We will be using a training dataset of 74,111 Airbnb listings across 6 major US cities (Boston, Chicago, DC, LA, NYC, SF). The dataset was taken from Kaggle’s “Deloitte Machine Learning Competition”.
+There are a total of 29 features including: **room_type**, **bathrooms**, **bedrooms**, **beds**, **review_scores_rating**, and **neighbourhood**.
+
+The feature we want to predict is **log_price**.
+
+```{r}
+airbnb_train <- read.csv("Deloitte Airbnb/train.csv")
+```
+# 3. Data understanding and Cleaning
+
+```{r}
+head(airbnb_train)
+### Take natural logarithm of the price
+airbnb_train$price <- exp((airbnb_train$log_price))
+ggplot(airbnb_train, aes(x = price)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.2, color = "black", fill = "lightblue") +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Histogram", x = "log_price", y = "Density")
+
+ggplot(airbnb_train, aes(x = log_price)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.2, color = "black", fill = "lightblue") +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Histogram", x = "log_price", y = "Density")
+### The distribution of prices will be skewed to the right because most listings cost a modest amount but a few cost a very large amount.Taking the natural logarithm of the price can make the effective relationship non-linear, but still preserving the linear model.
+```
+
+```{r}
+### list all variables
+num_variables <- ncol(airbnb_train)
+variable_names <- colnames(airbnb_train)
+cat("Variable names:\n")
+for (variable_name in variable_names) {
+  cat(variable_name, "\n")
+}
+
+### Manually eliminated some features we felt were difficult to use, difficult to enumerate, or unnecessary. The features removed were id, amenities, description, first_review,host_since, host_response_rate, last_review, name, and thumbnail_url. This left us with 19 features to predict log_price with.
+
+airbnb_train1 <- subset(airbnb_train,select = -c(id,amenities,description,first_review,host_since,host_response_rate,last_review,name,thumbnail_url))
+```
+
+
+```{r}
+### Check missing values
+### 1. If there is NULL value, input 0
+columns_with_null <- colSums(is.na(airbnb_train1)) > 0
+cat("Columns with NULL values:", colnames(airbnb_train1)[columns_with_null], "\n")
+airbnb_train1[is.na(airbnb_train1)] <- 0
+
+### 2. If there is empty cell, delete those observations
+columns_with_empty <- colSums(airbnb_train1 == "") > 0
+cat("Columns with empty values:", colnames(airbnb_train1)[columns_with_empty], "\n")
+empty_rows_count <- sum(airbnb_train1$host_has_profile_pic == "" | airbnb_train1$host_identity_verified == "" |airbnb_train1$neighbourhood == "" | airbnb_train1$zipcode == "")
+cat("Number of rows with empty variables:", empty_rows_count, "\n")
+### there are 7634 rows having empty variables
+airbnb_train2 <- airbnb_train1[airbnb_train1$host_has_profile_pic != "" & airbnb_train1$host_identity_verified != "" & airbnb_train1$neighbourhood != "" &airbnb_train1$zipcode != "",,drop=FALSE]
+str(airbnb_train2)
+### After missing value adjustment, now 66477 observations left in dataset.
+```
+# 4. Descriptive Statistics and Geospatial Analysis
+```{r}
+summary(airbnb_train2$price)
+usa_map <- map_data("state")
+ggplot() +
+  geom_polygon(data = usa_map, aes(x = long, y = lat, group = group), fill = "lightgray", color = "black") +
+  geom_point(data = airbnb_train2, aes(x = longitude, y = latitude, color = city), size = 3) +
+  labs(title = "Dots on USA Map", x = "Longitude", y = "Latitude")
+### 2 West Coast: Los Angeles, San Francisco; East Coast: Boston, New York, Washington D.C.;Midwestern: Chicago.
+
+count_by_city <- table(airbnb_train2$city)
+print(count_by_city)
+
+ggplot(airbnb_train2, aes(x = price, fill = city)) +
+  geom_histogram(binwidth = 0.5, color = "black", alpha = 0.5) +
+  facet_grid(city~.) +
+  labs(title = "Histograms with Fitting Lines", x = "Price", y = "Frequency")
+### NYC and LA have the most data observations, more than 30,000 and 17,000 respectively
+```
+
+
+```{r include=FALSE}
+### After geospatial analysis, we can now drop the variables latitude, longitude, and zipcode. Then create a features matrix X and target variable y.
+X <- subset(airbnb_train2,select= -c(log_price,price, latitude,longitude,zipcode))
+y <- airbnb_train2[,c(1)]
+```
+# 5. Feature Selection
+Feature selection helps identify and choose the most relevant and informative features from a given dataset. The primary function of feature selection is to reduce the dimensionality of the data by selecting a subset of features that have the most significant impact on the target variable or contribute the most to the predictive performance of the model.
+```{r eval=FALSE, echo=T}
+### stepwise regression
+model_stepwise <- stats::lm(y ~ ., data = X)
+summary(model_stepwise)
+model_step_final <-step(model_stepwise, direction = "both")
+summary(model_step_final)
+print(model_step_final)
+### recursive feature elimination
+control <- rfeControl(functions = rfFuncs,  
+                      method = "cv",
+                      number = 10) # Random Forest as the underlying model (for ranking purposes)
+svmFunc <- function(x, y, metric, vars, fixed, ...) {
+  library(e1071)  # Required for SVM
+  svm_model <- svm(x[, vars], y, ...)
+  predict(svm_model, x[, vars])
+}
+svmFuncs <- list(summary = svmFunc, fit = svmFunc, pred = svmFunc, rank = svmFunc)
+rfe_results <- rfe(x=X,y=y,sizes=c(1:ncol(X)),rfeControl = control, functions = svmFuncs)
+print(rfe_results)
+### Perform one-hot encoding for categorical variables
+str(X)
+categorical_vars <- c("property_type", "room_type", "bed_type","cancellation_policy","cleaning_fee","city",
+                      "host_has_profile_pic","host_identity_verified","instant_bookable","neighbourhood")
+
+categorical_vars
+
+encoded_X <- dummyVars("~.", data = X[,categorical_vars], sep = "_")
+encoded_X <- predict(encoded_X, newdata=X[, categorical_vars])
+
+X_encoded <- cbind(X[, -which(names(X) %in% categorical_vars)], encoded_X)
+str(X_encoded)
+
+features <- as.matrix(X_encoded)
+target <- as.matrix(y)
+
+lasso_model_fs <- glmnet(features, target, alpha = 1, lambda = NULL)
+cv_model_fs <- cv.glmnet(features, target, alpha = 1)
+selected_features <- coef(cv_model_fs, s = cv_model_fs$lambda.min)
+print(selected_features)
+```
+
+```{r echo=FALSE, out.width = "80%", fig.align = "center"}
+knitr::include_graphics("Deloitte Airbnb/feature_selected.png")
+```
+# Statistical Modeling
+```{r}
+### Keep top 10 important features
+X <- subset(X,select=-c(property_type,cleaning_fee,number_of_reviews,neighbourhood,host_has_profile_pic,host_identity_verified))
+str(X)
+X$room_type <- as.factor(X$room_type)
+X$bed_type <- as.factor(X$bed_type)
+X$cancellation_policy <- as.factor(X$cancellation_policy)
+X$city <- as.factor(X$city)
+X$instant_bookable<- as.factor(X$instant_bookable)
+
+### Perform one-hot encoding for categorical variables
+dummy_dataset <- dummyVars("~.",data=X)
+
+encoded_X <- as.data.frame(predict(dummy_dataset, newdata = X))
+
+train_indices <- createDataPartition(y, times=1,p=0.8,list=FALSE)
+train_features <- encoded_X[train_indices, ]
+train_target <- y[train_indices]
+test_features <- encoded_X[-train_indices, ]
+test_target <- y[-train_indices]
+```
+### Linear Regression Model
+```{r warning=FALSE}
+set.seed(321)
+folds <- createFolds(train_target,k=10,list=TRUE,returnTrain=FALSE)
+lm_model <- train(train_features, train_target, method = "lm",trControl = trainControl(method="cv",index=folds))
+summary(lm_model)
+lm_predictions <- predict(lm_model, newdata = test_features)
+lm_rmse <- sqrt(mean((lm_predictions - test_target)^2))
+print(lm_rmse)
+```
+### Lasso and Ridge
+Both Lasso and Ridge provide a way to control model complexity and improve generalization by introducing a regularization term. The choice between them depends on the specific problem and the desired outcome: Lasso for feature selection and sparse models, and Ridge for stability and handling multicollinearity.
+```{r}
+lasso_model <- train(
+  x = train_features,
+  y = train_target,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", index = folds),
+  tuneGrid = expand.grid(alpha = 1, lambda = seq(0.01, 1, length = 10))
+)
+print(lasso_model)
+lasso_predictions <- predict(lasso_model, newdata = test_features)
+lasso_rmse <- sqrt(mean((lasso_predictions - test_target)^2))
+print(lasso_rmse)
+
+ridge_model <- train(
+  x = train_features,
+  y = train_target,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", index = folds),
+  tuneGrid = expand.grid(alpha = 0, lambda = seq(0.01, 1, length = 10))
+)
+print(ridge_model)
+ridge_predictions <- predict(ridge_model, newdata = test_features)
+ridge_rmse <- sqrt(mean((ridge_predictions - test_target)^2))
+print(ridge_rmse)
+```
+### SVM
+SVM is a versatile machine learning method that finds an optimal hyperplane to classify or predict data by maximizing the margin. It is robust, effective for complex datasets, and can handle both linear and non-linear relationships.
+```{r}
+set.seed(321)
+svm_model <- svm(train_features, train_target)
+print(svm_model)
+svm_predictions <- predict(svm_model, newdata = test_features)
+svm_rmse <- sqrt(mean((svm_predictions - test_target)^2))
+print(svm_rmse)
+```
+
+### Random Forest
+Random Forest is an ensemble learning method that combines multiple decision trees, providing accurate and reliable predictions. It works by creating an ensemble of decision trees, where each tree is trained on a random subset of the data and features.
+```{r}
+set.seed(321)
+rm_model <- randomForest(train_features, train_target, ntree = 100)
+rm_predictions <- predict(rm_model, newdata =test_features)
+rm_rmse <- sqrt(mean((rm_predictions - test_target)^2))
+print(rm_rmse)
+
+```
+### XGBoost 
+
+```{r}
+set.seed(321)
+xgb_model<- xgboost(data = as.matrix(train_features), label = train_target, nrounds = 100, verbose = 0)
+xgb_predictions <- predict(xgb_model, as.matrix(test_features))
+xgb_rmse <- sqrt(mean((xgb_predictions - test_target)^2))
+print(xgb_rmse)
+```
+
+### Compare RMSE in different models
+```{r}
+rmse_compare <- data.frame(Variable = c("lm_rmse", "lasso_rmse", "ridge_rmse","svm_rmse","rm_rmse","xgb_rmse"),
+                 Value = c(lm_rmse, lasso_rmse, ridge_rmse,svm_rmse,rm_rmse,xgb_rmse),
+                 stringsAsFactors = FALSE)
+print(rmse_compare)
+
+### Based on the rmse results, XGBoost model fits the data best.
+```
+
+
+
+
+
+
+
